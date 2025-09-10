@@ -5,6 +5,8 @@ import os
 import sys
 import numpy as np
 import pandas as pd
+import zipfile
+import tensorflow as tf
 from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.preprocessing import LabelEncoder, StandardScaler, MinMaxScaler
 from sklearn.utils.class_weight import compute_class_weight
@@ -29,10 +31,10 @@ warnings.filterwarnings('ignore')
 # Configuration
 # ==============================================================================
 # Update these paths according to your setup
-base_path = '/content/drive/MyDrive/asteroid/'  # or your local path
+base_path = '.'  # or your local path
 catalog_path = os.path.join(base_path, 'MITHNEOSCLEAN.csv')
-spectra_folder = os.path.join(base_path, 'visnir_files/')
-model_save_path = os.path.join(base_path, 'resource_value_model.h5')
+spectra_zip_path = os.path.join(base_path, 'visnir_files.zip')
+model_save_path = os.path.join(base_path, 'resource_value_model.keras')
 
 # Resource value mapping based on asteroid taxonomy and composition
 RESOURCE_VALUE_MAP = {
@@ -67,37 +69,40 @@ RESOURCE_VALUE_MAP = {
 # ==============================================================================
 # Enhanced Filename Mapping Function
 # ==============================================================================
-def create_filename_map(spectra_folder):
+def create_filename_map(spectra_zip_path):
     """Creates a robust filename mapping with multiple format support."""
     file_map = {}
-    print(f"Scanning directory: {spectra_folder} to build filename map...")
-    
-    if not os.path.exists(spectra_folder):
-        print(f"ERROR: Directory {spectra_folder} does not exist!")
+    print(f"Scanning zip archive: {spectra_zip_path} to build filename map...")
+
+    if not os.path.exists(spectra_zip_path):
+        print(f"ERROR: Zip archive {spectra_zip_path} does not exist!")
         return file_map
 
-    for filename in os.listdir(spectra_folder):
-        if filename.endswith('.txt') or filename.endswith('.dat'):
-            try:
-                # Handle various filename formats
-                if filename.startswith('a') and len(filename) > 7:
-                    # Format: a000001.txt
-                    asteroid_id = int(filename[1:7])
-                    file_map[asteroid_id] = filename
-                elif filename.startswith('a'):
-                    # Format: a1.txt, a289.txt
-                    parts = filename.replace('a', '').replace('.txt', '').replace('.dat', '')
-                    asteroid_id = int(parts)
-                    file_map[asteroid_id] = filename
-                else:
-                    # Format: 1.txt, 289.txt
-                    parts = filename.replace('.txt', '').replace('.dat', '').split('.')[0]
-                    asteroid_id = int(parts)
-                    file_map[asteroid_id] = filename
-                    
-            except (ValueError, IndexError):
-                print(f"Warning: Could not parse asteroid ID from filename: {filename}")
-                continue
+    with zipfile.ZipFile(spectra_zip_path, 'r') as zip_ref:
+        for filename in zip_ref.namelist():
+            if (filename.endswith('.txt') or filename.endswith('.dat')) and not filename.startswith('__MACOSX'):
+                try:
+                    # Extract the base name of the file
+                    base_filename = os.path.basename(filename)
+                    # Handle various filename formats
+                    if base_filename.startswith('a') and len(base_filename) > 7:
+                        # Format: a000001.txt
+                        asteroid_id = int(base_filename[1:7])
+                        file_map[asteroid_id] = filename
+                    elif base_filename.startswith('a'):
+                        # Format: a1.txt, a289.txt
+                        parts = base_filename.replace('a', '').replace('.txt', '').replace('.dat', '')
+                        asteroid_id = int(parts)
+                        file_map[asteroid_id] = filename
+                    else:
+                        # Format: 1.txt, 289.txt
+                        parts = base_filename.replace('.txt', '').replace('.dat', '').split('.')[0]
+                        asteroid_id = int(parts)
+                        file_map[asteroid_id] = filename
+
+                except (ValueError, IndexError):
+                    print(f"Warning: Could not parse asteroid ID from filename: {filename}")
+                    continue
 
     print(f"Successfully created map with {len(file_map)} entries.")
     return file_map
@@ -197,6 +202,11 @@ def extract_spectral_features(wavelength, reflectance):
     for feature in default_features:
         if feature not in features:
             features[feature] = 0.0
+
+    if 'nir_vis_ratio' not in features:
+        features['nir_vis_ratio'] = 1.0
+    if 'blue_red_ratio' not in features:
+        features['blue_red_ratio'] = 1.0
     
     return features
 
@@ -223,7 +233,7 @@ def assign_resource_value(taxonomy):
 # ==============================================================================
 # Enhanced Data Preparation
 # ==============================================================================
-def prepare_resource_data(spectra_folder, catalog, file_map):
+def prepare_resource_data(zip_file, catalog, file_map):
     """Prepare data for resource value prediction."""
     common_wavelength = np.linspace(0.45, 2.45, 200)  # Higher resolution
     
@@ -235,17 +245,20 @@ def prepare_resource_data(spectra_folder, catalog, file_map):
     
     print("Processing spectra for resource value prediction...")
     
+    # Drop rows where 'Number' is NaN
+    catalog.dropna(subset=['Number'], inplace=True)
+
     valid_samples = 0
     for _, row in catalog.iterrows():
         asteroid_id = int(row['Number'])
         
         if asteroid_id in file_map:
             filename = file_map[asteroid_id]
-            spectral_file_path = os.path.join(spectra_folder, filename)
             
             try:
-                # Load spectrum
-                spectrum = np.loadtxt(spectral_file_path, comments='#')
+                # Load spectrum from zip file
+                with zip_file.open(filename) as f:
+                    spectrum = np.loadtxt(f, comments='#', usecols=(0, 1))
                 
                 if spectrum.shape[0] < 10:
                     continue
@@ -323,27 +336,27 @@ def create_resource_value_model(spectral_shape, feature_shape):
     x = Conv1D(32, 15, padding='same', activation='relu')(spectral_input)
     x = BatchNormalization()(x)
     x = MaxPooling1D(2)(x)
-    x = Dropout(0.2)(x)
+    x = Dropout(0.15)(x)
     
     x = Conv1D(64, 10, padding='same', activation='relu')(x)
     x = BatchNormalization()(x)
     x = MaxPooling1D(2)(x)
-    x = Dropout(0.3)(x)
+    x = Dropout(0.25)(x)
     
     x = Conv1D(128, 5, padding='same', activation='relu')(x)
     x = BatchNormalization()(x)
     x = GlobalMaxPooling1D()(x)
-    x = Dropout(0.4)(x)
+    x = Dropout(0.35)(x)
     
     # Feature branch
     feature_input = Input(shape=(feature_shape,), name='feature_input')
     f = Dense(64, activation='relu', kernel_regularizer=l2(0.001))(feature_input)
     f = BatchNormalization()(f)
-    f = Dropout(0.3)(f)
+    f = Dropout(0.25)(f)
     
     f = Dense(32, activation='relu', kernel_regularizer=l2(0.001))(f)
     f = BatchNormalization()(f)
-    f = Dropout(0.2)(f)
+    f = Dropout(0.15)(f)
     
     # Combine branches
     combined = Concatenate()([x, f])
@@ -351,15 +364,15 @@ def create_resource_value_model(spectral_shape, feature_shape):
     # Shared dense layers
     z = Dense(256, activation='relu', kernel_regularizer=l2(0.001))(combined)
     z = BatchNormalization()(z)
-    z = Dropout(0.5)(z)
+    z = Dropout(0.4)(z)
     
     z = Dense(128, activation='relu', kernel_regularizer=l2(0.001))(z)
     z = BatchNormalization()(z)
-    z = Dropout(0.4)(z)
+    z = Dropout(0.3)(z)
     
     z = Dense(64, activation='relu', kernel_regularizer=l2(0.001))(z)
     z = BatchNormalization()(z)
-    z = Dropout(0.3)(z)
+    z = Dropout(0.2)(z)
     
     # Resource value output (regression)
     resource_output = Dense(1, activation='sigmoid', name='resource_value')(z)
@@ -405,7 +418,7 @@ def train_resource_model(X_spectra, X_features, y_values):
     )
     
     model.compile(
-        optimizer=Adam(learning_rate=0.001),
+        optimizer=Adam(learning_rate=0.0005),
         loss='mse',
         metrics=['mae']
     )
@@ -434,7 +447,7 @@ def train_resource_model(X_spectra, X_features, y_values):
         epochs=200,
         batch_size=32,
         callbacks=[early_stopping, reduce_lr, checkpoint],
-        verbose=1
+        verbose=2
     )
     
     # Evaluate
@@ -529,16 +542,10 @@ def predict_resource_values(model, feature_scaler, X_spectra, X_features, astero
 # ==============================================================================
 def main():
     """Main execution function."""
+    np.random.seed(42)
+    tf.random.set_seed(42)
     print("NEA RESOURCE VALUE PREDICTOR")
     print("="*50)
-    
-    # Check if running in Google Colab
-    try:
-        from google.colab import drive
-        drive.mount('/content/drive', force_remount=True)
-        print("Google Drive mounted successfully.")
-    except ImportError:
-        print("Not running in Google Colab - using local paths.")
     
     # Load catalog
     if not os.path.exists(catalog_path):
@@ -556,7 +563,7 @@ def main():
         return
     
     if 'Simplified Category' not in catalog.columns:
-        print("ERROR: 'Simplified' column not found in catalog.")
+        print("ERROR: 'Simplified Category' column not found in catalog.")
         return
     
     # Display taxonomy distribution
@@ -567,14 +574,15 @@ def main():
         print(f"  {tax}: {count} asteroids (Resource Value: {resource_val:.2f})")
     
     # Create filename map
-    filename_map = create_filename_map(spectra_folder)
+    filename_map = create_filename_map(spectra_zip_path)
     if not filename_map:
-        print("ERROR: No spectral files found. Please check the spectra_folder path.")
+        print("ERROR: No spectral files found. Please check the spectra_zip_path.")
         return
     
     # Prepare data
     print("\nPreparing spectral data...")
-    result = prepare_resource_data(spectra_folder, catalog, filename_map)
+    with zipfile.ZipFile(spectra_zip_path, 'r') as zip_file:
+        result = prepare_resource_data(zip_file, catalog, filename_map)
     
     if result[0] is None:
         print("ERROR: Data preparation failed.")
