@@ -7,18 +7,17 @@ import numpy as np
 import pandas as pd
 import zipfile
 import tensorflow as tf
-from sklearn.model_selection import train_test_split, StratifiedKFold
-from sklearn.preprocessing import LabelEncoder, StandardScaler, MinMaxScaler
-from sklearn.utils.class_weight import compute_class_weight
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from tensorflow.keras.models import Sequential, Model
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from imblearn.over_sampling import SMOTE
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (Dense, Dropout, BatchNormalization,
                                      Input, Concatenate, GaussianNoise,
                                      Activation, Conv1D, MaxPooling1D,
                                      GlobalMaxPooling1D)
 from tensorflow.keras.utils import to_categorical
-from tensorflow.keras.callbacks import (EarlyStopping, ReduceLROnPlateau,
-                                        ModelCheckpoint)
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.regularizers import l2
 from sklearn.metrics import classification_report, confusion_matrix
@@ -233,308 +232,194 @@ def assign_resource_value(taxonomy):
 # ==============================================================================
 # Enhanced Data Preparation
 # ==============================================================================
-def prepare_resource_data(zip_file, catalog, file_map):
-    """Prepare data for resource value prediction."""
-    common_wavelength = np.linspace(0.45, 2.45, 200)  # Higher resolution
-    
+def prepare_data_for_classification(zip_file, catalog, file_map):
+    """Prepare data for asteroid classification."""
+    common_wavelength = np.linspace(0.45, 2.45, 200)
+
     resampled_spectra = []
     spectral_features = []
-    resource_values = []
     taxonomies = []
     asteroid_ids = []
-    
-    print("Processing spectra for resource value prediction...")
-    
-    # Drop rows where 'Number' is NaN
-    catalog.dropna(subset=['Number'], inplace=True)
 
-    valid_samples = 0
+    print("Processing spectra for classification...")
+    
+    catalog.dropna(subset=['Number', 'Simplified Category'], inplace=True)
+
     for _, row in catalog.iterrows():
         asteroid_id = int(row['Number'])
-        
         if asteroid_id in file_map:
             filename = file_map[asteroid_id]
-            
             try:
-                # Load spectrum from zip file
                 with zip_file.open(filename) as f:
                     spectrum = np.loadtxt(f, comments='#', usecols=(0, 1))
-                
-                if spectrum.shape[0] < 10:
-                    continue
-                
+                if spectrum.shape[0] < 10: continue
+
                 wavelength, reflectance = spectrum[:, 0], spectrum[:, 1]
-                
-                # Quality control
                 mask = np.isfinite(wavelength) & np.isfinite(reflectance) & (reflectance > 0)
-                wavelength = wavelength[mask]
-                reflectance = reflectance[mask]
-                
-                if len(wavelength) < 10:
-                    continue
-                
-                # Normalize spectrum
+                wavelength, reflectance = wavelength[mask], reflectance[mask]
+                if len(wavelength) < 10: continue
+
                 if np.median(reflectance) > 0:
-                    reflectance = reflectance / np.median(reflectance)
+                    reflectance /= np.median(reflectance)
                 
-                # Remove extreme outliers
                 q1, q3 = np.percentile(reflectance, [5, 95])
                 reflectance = np.clip(reflectance, q1, q3)
-                
-                # Extract features
+
                 features = extract_spectral_features(wavelength, reflectance)
-                
-                # Resample to common grid
                 resampled_reflectance = np.interp(common_wavelength, wavelength, reflectance)
                 
-                # Apply light smoothing
                 try:
                     from scipy.ndimage import gaussian_filter1d
                     resampled_reflectance = gaussian_filter1d(resampled_reflectance, sigma=0.5)
                 except ImportError:
-                    # Fallback: simple moving average
-                    kernel_size = 3
-                    kernel = np.ones(kernel_size) / kernel_size
+                    kernel = np.ones(3) / 3
                     resampled_reflectance = np.convolve(resampled_reflectance, kernel, mode='same')
-                
-                # Get taxonomy and assign resource value
-                taxonomy = row['Simplified Category'] if 'Simplified Category' in row else 'Unknown'
-                resource_value = assign_resource_value(taxonomy)
-                
-                # Store data
+
                 resampled_spectra.append(resampled_reflectance)
                 spectral_features.append(list(features.values()))
-                resource_values.append(resource_value)
-                taxonomies.append(taxonomy)
+                taxonomies.append(row['Simplified Category'])
                 asteroid_ids.append(asteroid_id)
-                valid_samples += 1
-                
             except Exception as e:
                 print(f"Warning: Error processing {filename}: {str(e)}")
                 continue
     
-    print(f"Successfully processed {valid_samples} spectra.")
-    
+    print(f"Successfully processed {len(resampled_spectra)} spectra.")
     if not resampled_spectra:
-        return None, None, None, None, None
-    
+        return None, None, None, None
+
     X_spectra = np.array(resampled_spectra).reshape(-1, len(common_wavelength), 1)
     X_features = np.array(spectral_features)
-    y_values = np.array(resource_values)
     
-    return X_spectra, X_features, y_values, taxonomies, asteroid_ids
+    return X_spectra, X_features, taxonomies, asteroid_ids
 
 # ==============================================================================
-# Multi-Target Model Architecture
+# Classification Model Architecture
 # ==============================================================================
-def create_resource_value_model(spectral_shape, feature_shape):
-    """Create model for resource value prediction with multi-target output."""
-    
-    # Spectral CNN branch
+def create_classifier_model(spectral_shape, feature_shape, num_classes):
+    """Creates a model for asteroid classification."""
     spectral_input = Input(shape=spectral_shape, name='spectral_input')
-    
     x = Conv1D(32, 15, padding='same', activation='relu')(spectral_input)
     x = BatchNormalization()(x)
     x = MaxPooling1D(2)(x)
-    x = Dropout(0.15)(x)
-    
+    x = Dropout(0.2)(x)
     x = Conv1D(64, 10, padding='same', activation='relu')(x)
     x = BatchNormalization()(x)
     x = MaxPooling1D(2)(x)
-    x = Dropout(0.25)(x)
-    
+    x = Dropout(0.3)(x)
     x = Conv1D(128, 5, padding='same', activation='relu')(x)
     x = BatchNormalization()(x)
     x = GlobalMaxPooling1D()(x)
-    x = Dropout(0.35)(x)
-    
-    # Feature branch
+    x = Dropout(0.4)(x)
+
     feature_input = Input(shape=(feature_shape,), name='feature_input')
     f = Dense(64, activation='relu', kernel_regularizer=l2(0.001))(feature_input)
     f = BatchNormalization()(f)
-    f = Dropout(0.25)(f)
-    
+    f = Dropout(0.3)(f)
     f = Dense(32, activation='relu', kernel_regularizer=l2(0.001))(f)
     f = BatchNormalization()(f)
-    f = Dropout(0.15)(f)
-    
-    # Combine branches
+    f = Dropout(0.2)(f)
+
     combined = Concatenate()([x, f])
-    
-    # Shared dense layers
     z = Dense(256, activation='relu', kernel_regularizer=l2(0.001))(combined)
     z = BatchNormalization()(z)
+    z = Dropout(0.5)(z)
+    z = Dense(128, activation='relu')(z)
     z = Dropout(0.4)(z)
     
-    z = Dense(128, activation='relu', kernel_regularizer=l2(0.001))(z)
-    z = BatchNormalization()(z)
-    z = Dropout(0.3)(z)
+    class_output = Dense(num_classes, activation='softmax', name='class_output')(z)
     
-    z = Dense(64, activation='relu', kernel_regularizer=l2(0.001))(z)
-    z = BatchNormalization()(z)
-    z = Dropout(0.2)(z)
-    
-    # Resource value output (regression)
-    resource_output = Dense(1, activation='sigmoid', name='resource_value')(z)
-    
-    # Create model
-    model = Model(inputs=[spectral_input, feature_input], outputs=resource_output)
-    
+    model = Model(inputs=[spectral_input, feature_input], outputs=class_output)
     return model
 
 # ==============================================================================
 # Training and Evaluation
 # ==============================================================================
-def train_resource_model(X_spectra, X_features, y_values):
-    """Train the resource value prediction model."""
-    
+def train_classifier_model(X_spectra, X_features, y_cat, class_labels):
+    """Train and evaluate the asteroid classification model."""
     print("\n" + "="*60)
-    print("TRAINING RESOURCE VALUE PREDICTION MODEL")
+    print("TRAINING ASTEROID CLASSIFICATION MODEL")
     print("="*60)
     
-    # Split data
+    num_classes = len(class_labels)
+
     X_spec_train, X_spec_test, X_feat_train, X_feat_test, y_train, y_test = train_test_split(
-        X_spectra, X_features, y_values, test_size=0.2, random_state=42
-    )
+        X_spectra, X_features, y_cat, test_size=0.2, random_state=42, stratify=np.argmax(y_cat, axis=1))
     
     X_spec_train, X_spec_val, X_feat_train, X_feat_val, y_train, y_val = train_test_split(
-        X_spec_train, X_feat_train, y_train, test_size=0.25, random_state=42
-    )
+        X_spec_train, X_feat_train, y_train, test_size=0.25, random_state=42, stratify=np.argmax(y_train, axis=1))
     
-    # Scale features
     feature_scaler = StandardScaler()
     X_feat_train = feature_scaler.fit_transform(X_feat_train)
     X_feat_val = feature_scaler.transform(X_feat_val)
     X_feat_test = feature_scaler.transform(X_feat_test)
+
+    # Reshape for SMOTE
+    X_spec_train_reshaped = X_spec_train.reshape(X_spec_train.shape[0], -1)
+    X_train_combined = np.concatenate((X_spec_train_reshaped, X_feat_train), axis=1)
+
+    print(f"Original training samples: {len(y_train)}")
+    smote = SMOTE(random_state=42, k_neighbors=2)
+    X_train_res, y_train_res = smote.fit_resample(X_train_combined, y_train)
+    print(f"Resampled training samples: {len(y_train_res)}")
+
+    # Split back into spectral and feature data
+    X_spec_train_res = X_train_res[:, :X_spec_train_reshaped.shape[1]].reshape(-1, X_spec_train.shape[1], 1)
+    X_feat_train_res = X_train_res[:, X_spec_train_reshaped.shape[1]:]
     
-    print(f"Training samples: {len(X_spec_train)}")
-    print(f"Validation samples: {len(X_spec_val)}")
-    print(f"Test samples: {len(X_spec_test)}")
+    model = create_classifier_model((X_spectra.shape[1], 1), X_features.shape[1], num_classes)
+    model.compile(optimizer=Adam(learning_rate=0.0005), loss='categorical_crossentropy', metrics=['accuracy'])
     
-    # Create model
-    model = create_resource_value_model(
-        (X_spectra.shape[1], 1), 
-        X_features.shape[1]
-    )
-    
-    model.compile(
-        optimizer=Adam(learning_rate=0.0005),
-        loss='mse',
-        metrics=['mae']
-    )
-    
-    print("\nModel Summary:")
     model.summary()
     
-    # Callbacks
-    early_stopping = EarlyStopping(
-        monitor='val_loss', patience=25, restore_best_weights=True, verbose=1
-    )
+    callbacks = [
+        EarlyStopping(monitor='val_loss', patience=30, restore_best_weights=True, verbose=1),
+        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=15, min_lr=1e-6, verbose=1),
+        ModelCheckpoint(model_save_path, monitor='val_loss', save_best_only=True, verbose=1)
+    ]
     
-    reduce_lr = ReduceLROnPlateau(
-        monitor='val_loss', factor=0.5, patience=15, min_lr=1e-6, verbose=1
-    )
-    
-    checkpoint = ModelCheckpoint(
-        model_save_path, monitor='val_loss', save_best_only=True, verbose=1
-    )
-    
-    # Train model
-    print("\nStarting training...")
     history = model.fit(
-        [X_spec_train, X_feat_train], y_train,
+        [X_spec_train_res, X_feat_train_res], y_train_res,
         validation_data=([X_spec_val, X_feat_val], y_val),
-        epochs=200,
-        batch_size=32,
-        callbacks=[early_stopping, reduce_lr, checkpoint],
-        verbose=2
-    )
-    
-    # Evaluate
+        epochs=200, batch_size=32, callbacks=callbacks, verbose=2)
+
     print("\nEvaluating model...")
-    test_loss, test_mae = model.evaluate([X_spec_test, X_feat_test], y_test, verbose=0)
-    
-    # Predictions
-    y_pred = model.predict([X_spec_test, X_feat_test]).flatten()
-    
-    # Calculate metrics
-    mse = mean_squared_error(y_test, y_pred)
-    mae = mean_absolute_error(y_test, y_pred)
-    r2 = r2_score(y_test, y_pred)
-    rmse = np.sqrt(mse)
-    
-    print(f"\nTest Results:")
-    print(f"MSE: {mse:.4f}")
-    print(f"MAE: {mae:.4f}")
-    print(f"RMSE: {rmse:.4f}")
-    print(f"R² Score: {r2:.4f}")
-    
-    # Plotting
-    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-    
-    # Training history
-    axes[0,0].plot(history.history['loss'], label='Train Loss', linewidth=2)
-    axes[0,0].plot(history.history['val_loss'], label='Validation Loss', linewidth=2)
-    axes[0,0].set_title('Training History - Loss')
-    axes[0,0].set_xlabel('Epoch')
-    axes[0,0].set_ylabel('Loss (MSE)')
-    axes[0,0].legend()
-    axes[0,0].grid(True, alpha=0.3)
-    
-    axes[0,1].plot(history.history['mae'], label='Train MAE', linewidth=2)
-    axes[0,1].plot(history.history['val_mae'], label='Validation MAE', linewidth=2)
-    axes[0,1].set_title('Training History - MAE')
-    axes[0,1].set_xlabel('Epoch')
-    axes[0,1].set_ylabel('Mean Absolute Error')
-    axes[0,1].legend()
-    axes[0,1].grid(True, alpha=0.3)
-    
-    # Predictions vs Actual
-    axes[1,0].scatter(y_test, y_pred, alpha=0.6, s=50)
-    axes[1,0].plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', linewidth=2)
-    axes[1,0].set_xlabel('Actual Resource Value')
-    axes[1,0].set_ylabel('Predicted Resource Value')
-    axes[1,0].set_title(f'Predictions vs Actual (R² = {r2:.3f})')
-    axes[1,0].grid(True, alpha=0.3)
-    
-    # Residuals
-    residuals = y_test - y_pred
-    axes[1,1].scatter(y_pred, residuals, alpha=0.6, s=50)
-    axes[1,1].axhline(y=0, color='r', linestyle='--', linewidth=2)
-    axes[1,1].set_xlabel('Predicted Resource Value')
-    axes[1,1].set_ylabel('Residuals')
-    axes[1,1].set_title('Residual Plot')
-    axes[1,1].grid(True, alpha=0.3)
-    
-    plt.tight_layout()
+    y_pred_probs = model.predict([X_spec_test, X_feat_test])
+    y_pred = np.argmax(y_pred_probs, axis=1)
+    y_true = np.argmax(y_test, axis=1)
+
+    print("\nClassification Report:")
+    print(classification_report(y_true, y_pred, target_names=class_labels))
+
+    print("\nConfusion Matrix:")
+    cm = confusion_matrix(y_true, y_pred)
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(cm, annot=True, fmt='d', xticklabels=class_labels, yticklabels=class_labels)
+    plt.title('Confusion Matrix')
+    plt.ylabel('Actual')
+    plt.xlabel('Predicted')
     plt.show()
-    
+
     return model, feature_scaler, history
 
 # ==============================================================================
 # Prediction Function
 # ==============================================================================
-def predict_resource_values(model, feature_scaler, X_spectra, X_features, asteroid_ids, taxonomies):
-    """Generate resource value predictions for all asteroids."""
-    
-    # Scale features
+def predict_asteroid_classes(model, feature_scaler, X_spectra, X_features, asteroid_ids, taxonomies, label_encoder):
+    """Generate class predictions for all asteroids."""
     X_features_scaled = feature_scaler.transform(X_features)
-    
-    # Predict
-    predictions = model.predict([X_spectra, X_features_scaled]).flatten()
-    
-    # Create results DataFrame
+    predictions = model.predict([X_spectra, X_features_scaled])
+    predicted_classes = label_encoder.inverse_transform(np.argmax(predictions, axis=1))
+
     results = pd.DataFrame({
         'Asteroid_ID': asteroid_ids,
-        'Taxonomy': taxonomies,
-        'Predicted_Resource_Value': predictions,
-        'Resource_Rank': range(1, len(predictions) + 1)
+        'Original_Taxonomy': taxonomies,
+        'Predicted_Taxonomy': predicted_classes,
     })
     
-    # Sort by resource value (descending)
-    results = results.sort_values('Predicted_Resource_Value', ascending=False)
-    results['Resource_Rank'] = range(1, len(results) + 1)
-    
+    # Add predicted probabilities for each class
+    for i, class_label in enumerate(label_encoder.classes_):
+        results[f'Prob_{class_label}'] = predictions[:, i]
+
     return results
 
 # ==============================================================================
@@ -544,96 +429,43 @@ def main():
     """Main execution function."""
     np.random.seed(42)
     tf.random.set_seed(42)
-    print("NEA RESOURCE VALUE PREDICTOR")
+    print("ASTEROID CLASSIFICATION")
     print("="*50)
-    
-    # Load catalog
-    if not os.path.exists(catalog_path):
-        print(f"ERROR: Catalog file not found at {catalog_path}")
-        print("Please update the catalog_path variable in the configuration section.")
-        return
-    
+
     catalog = pd.read_csv(catalog_path)
     print(f"Loaded catalog with {len(catalog)} entries.")
-    print(f"Available columns: {list(catalog.columns)}")
     
-    # Check required columns
-    if 'Number' not in catalog.columns:
-        print("ERROR: 'Number' column not found in catalog.")
-        return
-    
-    if 'Simplified Category' not in catalog.columns:
-        print("ERROR: 'Simplified Category' column not found in catalog.")
-        return
-    
-    # Display taxonomy distribution
-    print("\nTaxonomy Distribution:")
-    tax_counts = catalog['Simplified Category'].value_counts()
-    for tax, count in tax_counts.items():
-        resource_val = assign_resource_value(tax)
-        print(f"  {tax}: {count} asteroids (Resource Value: {resource_val:.2f})")
-    
-    # Create filename map
     filename_map = create_filename_map(spectra_zip_path)
-    if not filename_map:
-        print("ERROR: No spectral files found. Please check the spectra_zip_path.")
-        return
-    
-    # Prepare data
-    print("\nPreparing spectral data...")
+    if not filename_map: return
+
     with zipfile.ZipFile(spectra_zip_path, 'r') as zip_file:
-        result = prepare_resource_data(zip_file, catalog, filename_map)
-    
-    if result[0] is None:
-        print("ERROR: Data preparation failed.")
+        X_spectra, X_features, taxonomies, asteroid_ids = prepare_data_for_classification(zip_file, catalog, filename_map)
+
+    if X_spectra is None:
+        print("Data preparation failed.")
         return
+
+    le = LabelEncoder()
+    y_encoded = le.fit_transform(taxonomies)
+    y_cat = to_categorical(y_encoded)
     
-    X_spectra, X_features, y_values, taxonomies, asteroid_ids = result
+    model, feature_scaler, history = train_classifier_model(X_spectra, X_features, y_cat, le.classes_)
+
+    print("\nGenerating predictions for all asteroids...")
+    results = predict_asteroid_classes(model, feature_scaler, X_spectra, X_features, asteroid_ids, taxonomies, le)
     
-    print(f"Data shapes:")
-    print(f"  Spectral data: {X_spectra.shape}")
-    print(f"  Feature data: {X_features.shape}")
-    print(f"  Resource values: {y_values.shape}")
-    
-    print(f"\nResource value statistics:")
-    print(f"  Mean: {np.mean(y_values):.3f}")
-    print(f"  Std: {np.std(y_values):.3f}")
-    print(f"  Min: {np.min(y_values):.3f}")
-    print(f"  Max: {np.max(y_values):.3f}")
-    
-    # Train model
-    model, feature_scaler, history = train_resource_model(X_spectra, X_features, y_values)
-    
-    # Generate predictions for all asteroids
-    print("\nGenerating resource value predictions...")
-    results = predict_resource_values(
-        model, feature_scaler, X_spectra, X_features, asteroid_ids, taxonomies
-    )
-    
-    # Display top 20 most promising asteroids
-    print("\n" + "="*80)
-    print("TOP 20 MOST PROMISING NEAs FOR RESOURCE PROSPECTING")
-    print("="*80)
-    
-    top_20 = results.head(20)
-    for idx, row in top_20.iterrows():
-        print(f"{row['Resource_Rank']:2d}. Asteroid {row['Asteroid_ID']:6d} "
-              f"({row['Taxonomy']:>3s}) - Resource Value: {row['Predicted_Resource_Value']:.3f}")
-    
-    # Save results
-    results_path = os.path.join(base_path, 'nea_resource_predictions.csv')
+    results_path = os.path.join(base_path, 'nea_classification_predictions.csv')
     results.to_csv(results_path, index=False)
     print(f"\nAll predictions saved to: {results_path}")
     
-    # Save model components
-    scaler_path = os.path.join(base_path, 'resource_feature_scaler.pkl')
+    scaler_path = os.path.join(base_path, 'classification_feature_scaler.pkl')
     import pickle
     with open(scaler_path, 'wb') as f:
         pickle.dump(feature_scaler, f)
     print(f"Feature scaler saved to: {scaler_path}")
     
     print(f"\nModel saved to: {model_save_path}")
-    print("\nResource value prediction complete!")
+    print("\nClassification complete!")
     
     return results
 
