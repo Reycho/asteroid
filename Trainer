@@ -1,0 +1,636 @@
+# ==============================================================================
+# Enhanced NEA Resource Value Predictor with Multi-Target Learning
+# ==============================================================================
+import os
+import sys
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.preprocessing import LabelEncoder, StandardScaler, MinMaxScaler
+from sklearn.utils.class_weight import compute_class_weight
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.layers import (Dense, Dropout, BatchNormalization,
+                                     Input, Concatenate, GaussianNoise,
+                                     Activation, Conv1D, MaxPooling1D,
+                                     GlobalMaxPooling1D)
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.callbacks import (EarlyStopping, ReduceLROnPlateau,
+                                        ModelCheckpoint)
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.regularizers import l2
+from sklearn.metrics import classification_report, confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
+import warnings
+warnings.filterwarnings('ignore')
+
+# ==============================================================================
+# Configuration
+# ==============================================================================
+# Update these paths according to your setup
+base_path = '/content/drive/MyDrive/asteroid/'  # or your local path
+catalog_path = os.path.join(base_path, 'MITHNEOSCLEAN.csv')
+spectra_folder = os.path.join(base_path, 'visnir_files/')
+model_save_path = os.path.join(base_path, 'resource_value_model.h5')
+
+# Resource value mapping based on asteroid taxonomy and composition
+RESOURCE_VALUE_MAP = {
+    'C': 0.3,   # C-type: low metal, water potential
+    'S': 0.7,   # S-type: moderate metals, silicates
+    'X': 0.9,   # X-type: high metal content
+    'M': 0.95,  # M-type: metallic, highest value
+    'V': 0.6,   # V-type: basaltic, moderate value
+    'A': 0.4,   # A-type: olivine-rich, low-moderate value
+    'D': 0.2,   # D-type: organic-rich, low metal value
+    'T': 0.25,  # T-type: similar to D-type
+    'B': 0.35,  # B-type: similar to C-type but slightly higher
+    'F': 0.3,   # F-type: similar to C-type
+    'G': 0.35,  # G-type: similar to C-type
+    'P': 0.2,   # P-type: very low albedo, organic materials
+    'R': 0.5,   # R-type: olivine-pyroxene rich
+    'E': 0.8,   # E-type: enstatite, potential metals
+    'Q': 0.65,  # Q-type: ordinary chondrite-like
+    'L': 0.4,   # L-type: unusual spectrum
+    'K': 0.45,  # K-type: intermediate
+    'Sq': 0.68, # S-subtype
+    'Sr': 0.72, # S-subtype
+    'Sw': 0.66, # S-subtype
+    'Sa': 0.7,  # S-subtype
+    'Sk': 0.69, # S-subtype
+    'Sl': 0.71, # S-subtype
+    'Xc': 0.85, # X-subtype
+    'Xe': 0.92, # X-subtype
+    'Xk': 0.88, # X-subtype
+}
+
+# ==============================================================================
+# Enhanced Filename Mapping Function
+# ==============================================================================
+def create_filename_map(spectra_folder):
+    """Creates a robust filename mapping with multiple format support."""
+    file_map = {}
+    print(f"Scanning directory: {spectra_folder} to build filename map...")
+    
+    if not os.path.exists(spectra_folder):
+        print(f"ERROR: Directory {spectra_folder} does not exist!")
+        return file_map
+
+    for filename in os.listdir(spectra_folder):
+        if filename.endswith('.txt') or filename.endswith('.dat'):
+            try:
+                # Handle various filename formats
+                if filename.startswith('a') and len(filename) > 7:
+                    # Format: a000001.txt
+                    asteroid_id = int(filename[1:7])
+                    file_map[asteroid_id] = filename
+                elif filename.startswith('a'):
+                    # Format: a1.txt, a289.txt
+                    parts = filename.replace('a', '').replace('.txt', '').replace('.dat', '')
+                    asteroid_id = int(parts)
+                    file_map[asteroid_id] = filename
+                else:
+                    # Format: 1.txt, 289.txt
+                    parts = filename.replace('.txt', '').replace('.dat', '').split('.')[0]
+                    asteroid_id = int(parts)
+                    file_map[asteroid_id] = filename
+                    
+            except (ValueError, IndexError):
+                print(f"Warning: Could not parse asteroid ID from filename: {filename}")
+                continue
+
+    print(f"Successfully created map with {len(file_map)} entries.")
+    return file_map
+
+# ==============================================================================
+# Advanced Spectral Feature Extraction
+# ==============================================================================
+def extract_spectral_features(wavelength, reflectance):
+    """Extract comprehensive spectral features for resource assessment."""
+    features = {}
+    
+    # Basic spectral parameters
+    features['mean_reflectance'] = np.mean(reflectance)
+    features['std_reflectance'] = np.std(reflectance)
+    features['min_reflectance'] = np.min(reflectance)
+    features['max_reflectance'] = np.max(reflectance)
+    features['reflectance_range'] = np.ptp(reflectance)
+    
+    # Spectral slope (indicator of composition)
+    if len(wavelength) > 1:
+        slope = np.polyfit(wavelength, reflectance, 1)[0]
+        features['spectral_slope'] = slope
+        
+        # Visible slope (0.5-0.9 μm) - important for S-type identification
+        vis_mask = (wavelength >= 0.5) & (wavelength <= 0.9)
+        if np.sum(vis_mask) > 5:
+            vis_slope = np.polyfit(wavelength[vis_mask], reflectance[vis_mask], 1)[0]
+            features['visible_slope'] = vis_slope
+        else:
+            features['visible_slope'] = slope
+    
+    # Band analysis for mineral identification
+    absorption_bands = []
+    
+    # 1 μm band (olivine/pyroxene - indicates S-type asteroids)
+    if np.min(wavelength) <= 1.0 <= np.max(wavelength):
+        idx_1um = np.argmin(np.abs(wavelength - 1.0))
+        if 2 < idx_1um < len(reflectance) - 2:
+            continuum = np.mean([reflectance[idx_1um-2], reflectance[idx_1um+2]])
+            if continuum > 0:
+                band_depth = 1 - (reflectance[idx_1um] / continuum)
+                features['band_1um_depth'] = max(0, band_depth)
+                absorption_bands.append(band_depth)
+    
+    # 2 μm band (pyroxene - strong in S-types)
+    if np.min(wavelength) <= 2.0 <= np.max(wavelength):
+        idx_2um = np.argmin(np.abs(wavelength - 2.0))
+        if 2 < idx_2um < len(reflectance) - 2:
+            continuum = np.mean([reflectance[idx_2um-2], reflectance[idx_2um+2]])
+            if continuum > 0:
+                band_depth = 1 - (reflectance[idx_2um] / continuum)
+                features['band_2um_depth'] = max(0, band_depth)
+                absorption_bands.append(band_depth)
+    
+    # 0.7 μm feature (space weathering indicator)
+    if np.min(wavelength) <= 0.7 <= np.max(wavelength):
+        idx_07um = np.argmin(np.abs(wavelength - 0.7))
+        if 1 < idx_07um < len(reflectance) - 1:
+            continuum = (reflectance[idx_07um-1] + reflectance[idx_07um+1]) / 2
+            if continuum > 0:
+                band_depth = 1 - (reflectance[idx_07um] / continuum)
+                features['band_07um_depth'] = max(0, band_depth)
+    
+    # Color indices for composition discrimination
+    try:
+        # Near-IR to visible ratio (metal indicator)
+        if np.min(wavelength) <= 0.55 <= np.max(wavelength) and np.min(wavelength) <= 1.6 <= np.max(wavelength):
+            idx_055 = np.argmin(np.abs(wavelength - 0.55))
+            idx_160 = np.argmin(np.abs(wavelength - 1.6))
+            if reflectance[idx_055] > 0:
+                features['nir_vis_ratio'] = reflectance[idx_160] / reflectance[idx_055]
+        
+        # Blue-red color index
+        if np.min(wavelength) <= 0.45 <= np.max(wavelength) and np.min(wavelength) <= 0.75 <= np.max(wavelength):
+            idx_045 = np.argmin(np.abs(wavelength - 0.45))
+            idx_075 = np.argmin(np.abs(wavelength - 0.75))
+            if reflectance[idx_045] > 0:
+                features['blue_red_ratio'] = reflectance[idx_075] / reflectance[idx_045]
+    except:
+        features['nir_vis_ratio'] = 1.0
+        features['blue_red_ratio'] = 1.0
+    
+    # Curvature analysis
+    if len(reflectance) > 2:
+        second_derivative = np.diff(reflectance, n=2)
+        features['spectral_curvature'] = np.mean(second_derivative)
+        features['curvature_std'] = np.std(second_derivative)
+    
+    # Band strength (sum of absorption features)
+    features['total_band_strength'] = sum(absorption_bands) if absorption_bands else 0.0
+    
+    # Fill missing features with defaults
+    default_features = [
+        'band_1um_depth', 'band_2um_depth', 'band_07um_depth',
+        'visible_slope', 'spectral_curvature', 'curvature_std'
+    ]
+    for feature in default_features:
+        if feature not in features:
+            features[feature] = 0.0
+    
+    return features
+
+# ==============================================================================
+# Resource Value Assignment
+# ==============================================================================
+def assign_resource_value(taxonomy):
+    """Assign resource value based on asteroid taxonomy."""
+    # Clean taxonomy string
+    taxonomy_clean = str(taxonomy).strip().upper()
+    
+    # Direct match
+    if taxonomy_clean in RESOURCE_VALUE_MAP:
+        return RESOURCE_VALUE_MAP[taxonomy_clean]
+    
+    # Fuzzy matching for complex taxonomies
+    for key in RESOURCE_VALUE_MAP:
+        if key in taxonomy_clean:
+            return RESOURCE_VALUE_MAP[key]
+    
+    # Default for unknown types (conservative estimate)
+    return 0.3
+
+# ==============================================================================
+# Enhanced Data Preparation
+# ==============================================================================
+def prepare_resource_data(spectra_folder, catalog, file_map):
+    """Prepare data for resource value prediction."""
+    common_wavelength = np.linspace(0.45, 2.45, 200)  # Higher resolution
+    
+    resampled_spectra = []
+    spectral_features = []
+    resource_values = []
+    taxonomies = []
+    asteroid_ids = []
+    
+    print("Processing spectra for resource value prediction...")
+    
+    valid_samples = 0
+    for _, row in catalog.iterrows():
+        asteroid_id = int(row['Number'])
+        
+        if asteroid_id in file_map:
+            filename = file_map[asteroid_id]
+            spectral_file_path = os.path.join(spectra_folder, filename)
+            
+            try:
+                # Load spectrum
+                spectrum = np.loadtxt(spectral_file_path, comments='#')
+                
+                if spectrum.shape[0] < 10:
+                    continue
+                
+                wavelength, reflectance = spectrum[:, 0], spectrum[:, 1]
+                
+                # Quality control
+                mask = np.isfinite(wavelength) & np.isfinite(reflectance) & (reflectance > 0)
+                wavelength = wavelength[mask]
+                reflectance = reflectance[mask]
+                
+                if len(wavelength) < 10:
+                    continue
+                
+                # Normalize spectrum
+                if np.median(reflectance) > 0:
+                    reflectance = reflectance / np.median(reflectance)
+                
+                # Remove extreme outliers
+                q1, q3 = np.percentile(reflectance, [5, 95])
+                reflectance = np.clip(reflectance, q1, q3)
+                
+                # Extract features
+                features = extract_spectral_features(wavelength, reflectance)
+                
+                # Resample to common grid
+                resampled_reflectance = np.interp(common_wavelength, wavelength, reflectance)
+                
+                # Apply light smoothing
+                try:
+                    from scipy.ndimage import gaussian_filter1d
+                    resampled_reflectance = gaussian_filter1d(resampled_reflectance, sigma=0.5)
+                except ImportError:
+                    # Fallback: simple moving average
+                    kernel_size = 3
+                    kernel = np.ones(kernel_size) / kernel_size
+                    resampled_reflectance = np.convolve(resampled_reflectance, kernel, mode='same')
+                
+                # Get taxonomy and assign resource value
+                taxonomy = row['Simplified Category'] if 'Simplified Category' in row else 'Unknown'
+                resource_value = assign_resource_value(taxonomy)
+                
+                # Store data
+                resampled_spectra.append(resampled_reflectance)
+                spectral_features.append(list(features.values()))
+                resource_values.append(resource_value)
+                taxonomies.append(taxonomy)
+                asteroid_ids.append(asteroid_id)
+                valid_samples += 1
+                
+            except Exception as e:
+                print(f"Warning: Error processing {filename}: {str(e)}")
+                continue
+    
+    print(f"Successfully processed {valid_samples} spectra.")
+    
+    if not resampled_spectra:
+        return None, None, None, None, None
+    
+    X_spectra = np.array(resampled_spectra).reshape(-1, len(common_wavelength), 1)
+    X_features = np.array(spectral_features)
+    y_values = np.array(resource_values)
+    
+    return X_spectra, X_features, y_values, taxonomies, asteroid_ids
+
+# ==============================================================================
+# Multi-Target Model Architecture
+# ==============================================================================
+def create_resource_value_model(spectral_shape, feature_shape):
+    """Create model for resource value prediction with multi-target output."""
+    
+    # Spectral CNN branch
+    spectral_input = Input(shape=spectral_shape, name='spectral_input')
+    
+    x = Conv1D(32, 15, padding='same', activation='relu')(spectral_input)
+    x = BatchNormalization()(x)
+    x = MaxPooling1D(2)(x)
+    x = Dropout(0.2)(x)
+    
+    x = Conv1D(64, 10, padding='same', activation='relu')(x)
+    x = BatchNormalization()(x)
+    x = MaxPooling1D(2)(x)
+    x = Dropout(0.3)(x)
+    
+    x = Conv1D(128, 5, padding='same', activation='relu')(x)
+    x = BatchNormalization()(x)
+    x = GlobalMaxPooling1D()(x)
+    x = Dropout(0.4)(x)
+    
+    # Feature branch
+    feature_input = Input(shape=(feature_shape,), name='feature_input')
+    f = Dense(64, activation='relu', kernel_regularizer=l2(0.001))(feature_input)
+    f = BatchNormalization()(f)
+    f = Dropout(0.3)(f)
+    
+    f = Dense(32, activation='relu', kernel_regularizer=l2(0.001))(f)
+    f = BatchNormalization()(f)
+    f = Dropout(0.2)(f)
+    
+    # Combine branches
+    combined = Concatenate()([x, f])
+    
+    # Shared dense layers
+    z = Dense(256, activation='relu', kernel_regularizer=l2(0.001))(combined)
+    z = BatchNormalization()(z)
+    z = Dropout(0.5)(z)
+    
+    z = Dense(128, activation='relu', kernel_regularizer=l2(0.001))(z)
+    z = BatchNormalization()(z)
+    z = Dropout(0.4)(z)
+    
+    z = Dense(64, activation='relu', kernel_regularizer=l2(0.001))(z)
+    z = BatchNormalization()(z)
+    z = Dropout(0.3)(z)
+    
+    # Resource value output (regression)
+    resource_output = Dense(1, activation='sigmoid', name='resource_value')(z)
+    
+    # Create model
+    model = Model(inputs=[spectral_input, feature_input], outputs=resource_output)
+    
+    return model
+
+# ==============================================================================
+# Training and Evaluation
+# ==============================================================================
+def train_resource_model(X_spectra, X_features, y_values):
+    """Train the resource value prediction model."""
+    
+    print("\n" + "="*60)
+    print("TRAINING RESOURCE VALUE PREDICTION MODEL")
+    print("="*60)
+    
+    # Split data
+    X_spec_train, X_spec_test, X_feat_train, X_feat_test, y_train, y_test = train_test_split(
+        X_spectra, X_features, y_values, test_size=0.2, random_state=42
+    )
+    
+    X_spec_train, X_spec_val, X_feat_train, X_feat_val, y_train, y_val = train_test_split(
+        X_spec_train, X_feat_train, y_train, test_size=0.25, random_state=42
+    )
+    
+    # Scale features
+    feature_scaler = StandardScaler()
+    X_feat_train = feature_scaler.fit_transform(X_feat_train)
+    X_feat_val = feature_scaler.transform(X_feat_val)
+    X_feat_test = feature_scaler.transform(X_feat_test)
+    
+    print(f"Training samples: {len(X_spec_train)}")
+    print(f"Validation samples: {len(X_spec_val)}")
+    print(f"Test samples: {len(X_spec_test)}")
+    
+    # Create model
+    model = create_resource_value_model(
+        (X_spectra.shape[1], 1), 
+        X_features.shape[1]
+    )
+    
+    model.compile(
+        optimizer=Adam(learning_rate=0.001),
+        loss='mse',
+        metrics=['mae']
+    )
+    
+    print("\nModel Summary:")
+    model.summary()
+    
+    # Callbacks
+    early_stopping = EarlyStopping(
+        monitor='val_loss', patience=25, restore_best_weights=True, verbose=1
+    )
+    
+    reduce_lr = ReduceLROnPlateau(
+        monitor='val_loss', factor=0.5, patience=15, min_lr=1e-6, verbose=1
+    )
+    
+    checkpoint = ModelCheckpoint(
+        model_save_path, monitor='val_loss', save_best_only=True, verbose=1
+    )
+    
+    # Train model
+    print("\nStarting training...")
+    history = model.fit(
+        [X_spec_train, X_feat_train], y_train,
+        validation_data=([X_spec_val, X_feat_val], y_val),
+        epochs=200,
+        batch_size=32,
+        callbacks=[early_stopping, reduce_lr, checkpoint],
+        verbose=1
+    )
+    
+    # Evaluate
+    print("\nEvaluating model...")
+    test_loss, test_mae = model.evaluate([X_spec_test, X_feat_test], y_test, verbose=0)
+    
+    # Predictions
+    y_pred = model.predict([X_spec_test, X_feat_test]).flatten()
+    
+    # Calculate metrics
+    mse = mean_squared_error(y_test, y_pred)
+    mae = mean_absolute_error(y_test, y_pred)
+    r2 = r2_score(y_test, y_pred)
+    rmse = np.sqrt(mse)
+    
+    print(f"\nTest Results:")
+    print(f"MSE: {mse:.4f}")
+    print(f"MAE: {mae:.4f}")
+    print(f"RMSE: {rmse:.4f}")
+    print(f"R² Score: {r2:.4f}")
+    
+    # Plotting
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    
+    # Training history
+    axes[0,0].plot(history.history['loss'], label='Train Loss', linewidth=2)
+    axes[0,0].plot(history.history['val_loss'], label='Validation Loss', linewidth=2)
+    axes[0,0].set_title('Training History - Loss')
+    axes[0,0].set_xlabel('Epoch')
+    axes[0,0].set_ylabel('Loss (MSE)')
+    axes[0,0].legend()
+    axes[0,0].grid(True, alpha=0.3)
+    
+    axes[0,1].plot(history.history['mae'], label='Train MAE', linewidth=2)
+    axes[0,1].plot(history.history['val_mae'], label='Validation MAE', linewidth=2)
+    axes[0,1].set_title('Training History - MAE')
+    axes[0,1].set_xlabel('Epoch')
+    axes[0,1].set_ylabel('Mean Absolute Error')
+    axes[0,1].legend()
+    axes[0,1].grid(True, alpha=0.3)
+    
+    # Predictions vs Actual
+    axes[1,0].scatter(y_test, y_pred, alpha=0.6, s=50)
+    axes[1,0].plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', linewidth=2)
+    axes[1,0].set_xlabel('Actual Resource Value')
+    axes[1,0].set_ylabel('Predicted Resource Value')
+    axes[1,0].set_title(f'Predictions vs Actual (R² = {r2:.3f})')
+    axes[1,0].grid(True, alpha=0.3)
+    
+    # Residuals
+    residuals = y_test - y_pred
+    axes[1,1].scatter(y_pred, residuals, alpha=0.6, s=50)
+    axes[1,1].axhline(y=0, color='r', linestyle='--', linewidth=2)
+    axes[1,1].set_xlabel('Predicted Resource Value')
+    axes[1,1].set_ylabel('Residuals')
+    axes[1,1].set_title('Residual Plot')
+    axes[1,1].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return model, feature_scaler, history
+
+# ==============================================================================
+# Prediction Function
+# ==============================================================================
+def predict_resource_values(model, feature_scaler, X_spectra, X_features, asteroid_ids, taxonomies):
+    """Generate resource value predictions for all asteroids."""
+    
+    # Scale features
+    X_features_scaled = feature_scaler.transform(X_features)
+    
+    # Predict
+    predictions = model.predict([X_spectra, X_features_scaled]).flatten()
+    
+    # Create results DataFrame
+    results = pd.DataFrame({
+        'Asteroid_ID': asteroid_ids,
+        'Taxonomy': taxonomies,
+        'Predicted_Resource_Value': predictions,
+        'Resource_Rank': range(1, len(predictions) + 1)
+    })
+    
+    # Sort by resource value (descending)
+    results = results.sort_values('Predicted_Resource_Value', ascending=False)
+    results['Resource_Rank'] = range(1, len(results) + 1)
+    
+    return results
+
+# ==============================================================================
+# Main Execution Function
+# ==============================================================================
+def main():
+    """Main execution function."""
+    print("NEA RESOURCE VALUE PREDICTOR")
+    print("="*50)
+    
+    # Check if running in Google Colab
+    try:
+        from google.colab import drive
+        drive.mount('/content/drive', force_remount=True)
+        print("Google Drive mounted successfully.")
+    except ImportError:
+        print("Not running in Google Colab - using local paths.")
+    
+    # Load catalog
+    if not os.path.exists(catalog_path):
+        print(f"ERROR: Catalog file not found at {catalog_path}")
+        print("Please update the catalog_path variable in the configuration section.")
+        return
+    
+    catalog = pd.read_csv(catalog_path)
+    print(f"Loaded catalog with {len(catalog)} entries.")
+    print(f"Available columns: {list(catalog.columns)}")
+    
+    # Check required columns
+    if 'Number' not in catalog.columns:
+        print("ERROR: 'Number' column not found in catalog.")
+        return
+    
+    if 'Simplified Category' not in catalog.columns:
+        print("ERROR: 'Simplified' column not found in catalog.")
+        return
+    
+    # Display taxonomy distribution
+    print("\nTaxonomy Distribution:")
+    tax_counts = catalog['Simplified Category'].value_counts()
+    for tax, count in tax_counts.items():
+        resource_val = assign_resource_value(tax)
+        print(f"  {tax}: {count} asteroids (Resource Value: {resource_val:.2f})")
+    
+    # Create filename map
+    filename_map = create_filename_map(spectra_folder)
+    if not filename_map:
+        print("ERROR: No spectral files found. Please check the spectra_folder path.")
+        return
+    
+    # Prepare data
+    print("\nPreparing spectral data...")
+    result = prepare_resource_data(spectra_folder, catalog, filename_map)
+    
+    if result[0] is None:
+        print("ERROR: Data preparation failed.")
+        return
+    
+    X_spectra, X_features, y_values, taxonomies, asteroid_ids = result
+    
+    print(f"Data shapes:")
+    print(f"  Spectral data: {X_spectra.shape}")
+    print(f"  Feature data: {X_features.shape}")
+    print(f"  Resource values: {y_values.shape}")
+    
+    print(f"\nResource value statistics:")
+    print(f"  Mean: {np.mean(y_values):.3f}")
+    print(f"  Std: {np.std(y_values):.3f}")
+    print(f"  Min: {np.min(y_values):.3f}")
+    print(f"  Max: {np.max(y_values):.3f}")
+    
+    # Train model
+    model, feature_scaler, history = train_resource_model(X_spectra, X_features, y_values)
+    
+    # Generate predictions for all asteroids
+    print("\nGenerating resource value predictions...")
+    results = predict_resource_values(
+        model, feature_scaler, X_spectra, X_features, asteroid_ids, taxonomies
+    )
+    
+    # Display top 20 most promising asteroids
+    print("\n" + "="*80)
+    print("TOP 20 MOST PROMISING NEAs FOR RESOURCE PROSPECTING")
+    print("="*80)
+    
+    top_20 = results.head(20)
+    for idx, row in top_20.iterrows():
+        print(f"{row['Resource_Rank']:2d}. Asteroid {row['Asteroid_ID']:6d} "
+              f"({row['Taxonomy']:>3s}) - Resource Value: {row['Predicted_Resource_Value']:.3f}")
+    
+    # Save results
+    results_path = os.path.join(base_path, 'nea_resource_predictions.csv')
+    results.to_csv(results_path, index=False)
+    print(f"\nAll predictions saved to: {results_path}")
+    
+    # Save model components
+    scaler_path = os.path.join(base_path, 'resource_feature_scaler.pkl')
+    import pickle
+    with open(scaler_path, 'wb') as f:
+        pickle.dump(feature_scaler, f)
+    print(f"Feature scaler saved to: {scaler_path}")
+    
+    print(f"\nModel saved to: {model_save_path}")
+    print("\nResource value prediction complete!")
+    
+    return results
+
+# ==============================================================================
+# Execute if run as main
+# ==============================================================================
+if __name__ == '__main__':
+    results = main()
