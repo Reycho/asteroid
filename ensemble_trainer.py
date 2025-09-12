@@ -5,6 +5,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import classification_report, confusion_matrix
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -177,10 +178,25 @@ if __name__ == '__main__':
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    # Train RandomForestClassifier
-    print("--- Training RandomForestClassifier ---")
-    model = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced', n_jobs=-1)
-    model.fit(X_train_scaled, y_train)
+    # Hyperparameter Tuning with GridSearchCV
+    print("--- Tuning RandomForestClassifier with GridSearchCV ---")
+    param_grid = {
+        'n_estimators': [100, 200],
+        'max_depth': [10, 20, None],
+        'min_samples_split': [2, 5],
+        'min_samples_leaf': [1, 2],
+        'max_features': ['sqrt', 'log2']
+    }
+
+    rf = RandomForestClassifier(random_state=42, class_weight='balanced')
+
+    grid_search = GridSearchCV(estimator=rf, param_grid=param_grid, cv=3, n_jobs=-1, verbose=2, scoring='accuracy')
+    grid_search.fit(X_train_scaled, y_train)
+
+    print("Best parameters found: ", grid_search.best_params_)
+
+    # Use the best estimator for evaluation
+    model = grid_search.best_estimator_
     print("--- Model training complete ---")
 
     # Evaluate the model
