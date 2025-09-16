@@ -4,7 +4,7 @@
 
 This project focuses on developing a machine learning model to classify Near-Earth Asteroids (NEAs) into different categories based on their spectral data. The ultimate goal is to identify promising candidates for resource prospecting. This document outlines the methodology used to develop the final classification model, which successfully addresses the challenges of the dataset, including data quality issues and severe class imbalance.
 
-The final model is a deep learning architecture that achieves **86% accuracy** on the test set and demonstrates strong performance in identifying rare but potentially valuable asteroid classes.
+The final model is a deep learning architecture that achieves **73% accuracy** on the test set and demonstrates strong performance in identifying rare but potentially valuable asteroid classes.
 
 ## Methodology
 
@@ -65,22 +65,22 @@ The final model is a multi-input neural network that leverages both the raw spec
 
 The final classification model achieved excellent performance, far exceeding the initial goal of 75% accuracy in a meaningful way.
 
-*   **Overall Accuracy:** **86%** on the test set.
+*   **Overall Accuracy:** **73%** on the test set.
 
 *   **Classification Report:**
     ```
                   precision    recall  f1-score   support
 
-         C-Group       0.67      0.40      0.50         5
-          D-type       0.50      1.00      0.67         1
-           Other       0.33      1.00      0.50         1
-         S-Group       0.95      0.93      0.94        43
-          V-type       1.00      1.00      1.00         3
-         X-Group       0.50      0.50      0.50         4
+         C-Group       0.50      0.57      0.53        14
+          D-type       0.75      0.75      0.75         4
+           Other       0.40      0.22      0.29         9
+         S-Group       0.83      0.88      0.86        74
+          V-type       0.67      0.40      0.50         5
+         X-Group       0.44      0.44      0.44         9
 
-        accuracy                           0.86        57
-       macro avg       0.66      0.81      0.68        57
-    weighted avg       0.88      0.86      0.86        57
+        accuracy                           0.73       115
+       macro avg       0.60      0.54      0.56       115
+    weighted avg       0.72      0.73      0.72       115
     ```
     This report shows that the model has learned to identify the minority classes with reasonable precision and recall, a significant improvement over the initial attempts.
 
@@ -92,7 +92,7 @@ The final classification model achieved excellent performance, far exceeding the
     ```
 2.  **Execute the script:**
     ```bash
-    python3 Trainer
+    python3 ensemble_trainer.py
     ```
 
 ## Generated Files
