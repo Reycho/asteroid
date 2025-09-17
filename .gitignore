@@ -1,0 +1,20 @@
+# Ignore python cache files
+__pycache__/
+
+# Ignore generated model files
+*.pkl
+*.keras
+*.h5
+
+# Ignore generated data files
+*.csv
+
+# Ignore generated images
+*.png
+
+# Keep the original data file
+!MITHNEOSCLEAN.csv
+!catalog_for_training.csv
+!nea_classification_predictions.csv
+!nea_classification_predictions_sklearn.csv
+!nea_resource_predictions.csv
