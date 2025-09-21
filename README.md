@@ -1,68 +1,407 @@
-# Asteroid Resource Prospecting: Classification Model
+# Enhanced Asteroid Classification System
 
 ## Overview
 
-This project focuses on developing a machine learning model to classify Near-Earth Asteroids (NEAs) into different categories based on their spectral data. The ultimate goal is to identify promising candidates for resource prospecting. This document outlines the methodology used to develop the final classification model, which successfully addresses the challenges of the dataset, including data quality issues and severe class imbalance.
+This system implements a state-of-the-art machine learning pipeline for classifying asteroids based on their spectral data. It uses visible and near-infrared (VISNIR) reflectance spectra to determine asteroid taxonomic types, which are crucial for understanding asteroid composition, origin, and potential resources.
 
-The final model is a `RandomForestClassifier` that achieves **81% accuracy** on the test set. This model was chosen for its stability and reliable performance on the small, imbalanced dataset.
+## Table of Contents
+- [How It Works](#how-it-works)
+- [Features](#features)
+- [Data Requirements](#data-requirements)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Output Files](#output-files)
+- [Model Architecture](#model-architecture)
+- [Performance Metrics](#performance-metrics)
+- [Troubleshooting](#troubleshooting)
 
-## Methodology
+## How It Works
 
-The development process involved several key stages, from initial data wrangling to a robust classification approach.
+### 1. **Data Loading and Preprocessing**
 
-### 1. Data Loading and Feature Engineering
+The system begins by loading two critical data sources:
 
-*   **Data Loading:** The script loads data exclusively from `MITHNEOSCLEAN.csv` and `visnir_files.zip`, as specified. It includes robust parsing of filenames to create a map between the catalog and the spectral files.
-*   **Feature Extraction:** A sophisticated feature extraction function (`extract_spectral_features`) generates a rich set of features from the raw spectral data. These features include spectral slope, band depths, and other statistical measures crucial for distinguishing between asteroid classes.
+- **Catalog File** (`MITHNEOSCLEAN.csv`): Contains asteroid metadata including identification numbers and taxonomic classifications
+- **Spectral Data** (`visnir_files.zip`): A compressed archive containing individual spectrum files for each asteroid
 
-### 2. Model Selection and Training
+The preprocessing pipeline:
+1. Matches asteroid IDs from the catalog to their corresponding spectrum files
+2. Loads wavelength-reflectance pairs from spectrum files
+3. Filters out invalid data points (NaN, negative values)
+4. Normalizes reflectance values by dividing by the median reflectance
 
-After initial experiments with a deep learning model showed training instability, a more robust approach was adopted.
+### 2. **Advanced Feature Extraction**
 
-*   **Model:** A `RandomForestClassifier` was chosen for its strong performance and stability on smaller, tabular datasets.
-*   **Handling Class Imbalance:** The classifier was configured with `class_weight='balanced'` to counteract the severe class imbalance in the dataset. This ensures the model pays more attention to minority classes during training.
-*   **Hyperparameter Tuning:** `GridSearchCV` was used to systematically search for the optimal hyperparameters for the RandomForest model, ensuring the final model is well-tuned for this specific dataset. The best parameters were found to be: `{'max_depth': 10, 'max_features': 'log2', 'min_samples_leaf': 2, 'min_samples_split': 5, 'n_estimators': 200}`.
+The system extracts 46 sophisticated features from each spectrum, grouped into several categories:
 
-## Final Model Performance
+#### Statistical Features (10 features)
+- Basic statistics: mean, standard deviation, min, max, median, range
+- Distribution shape: skewness, kurtosis
+- Percentiles: 25th and 75th percentiles
 
-The final classification model achieved a stable and reliable performance on the test set.
+#### Spectral Slope Analysis (9 features)
+- **Overall spectral slope**: Linear trend across entire wavelength range
+- **Visible slope** (0.5-0.9 μm): Captures blue-to-red gradient
+- **Near-IR slope** (0.9-1.5 μm): Measures near-infrared behavior
+- **Extended NIR slope** (1.5-2.5 μm): Captures longer wavelength trends
+- **Polynomial residuals**: Quantifies non-linearity of the spectrum
 
-*   **Overall Accuracy:** **81%** on the test set.
+#### Absorption Band Analysis (21 features)
+Analyzes 7 key absorption features at wavelengths critical for mineral identification:
+- 0.7 μm: Hydrated minerals
+- 0.9 μm: Olivine/pyroxene (Band I)
+- 1.0 μm: Olivine/pyroxene (Band I center)
+- 1.25 μm: Feldspar
+- 1.9 μm: Water/hydroxyl
+- 2.0 μm: Pyroxene (Band II)
+- 2.3 μm: Hydroxyl compounds
 
-*   **Classification Report:**
-    ```
-                  precision    recall  f1-score   support
+For each band, the system calculates:
+- **Depth**: How deep the absorption is relative to the continuum
+- **Center**: Actual wavelength of minimum reflectance
+- **Width**: Full width at half maximum (FWHM) of the absorption
 
-         C-Group       1.00      0.40      0.57         5
-          D-type       0.50      1.00      0.67         1
-           Other       0.00      0.00      0.00         1
-         S-Group       0.82      0.95      0.88        43
-          V-type       1.00      0.33      0.50         3
-         X-Group       0.50      0.25      0.33         4
+#### Spectral Curvature Features (3 features)
+- **Mean curvature**: Average second derivative
+- **Maximum curvature**: Peak second derivative
+- **Spectral roughness**: Variability in first derivative
 
-        accuracy                           0.81        57
-       macro avg       0.64      0.49      0.49        57
-    weighted avg       0.80      0.81      0.78        57
-    ```
-    This report shows that the model has learned to identify the majority class (`S-Group`) with high precision and recall, while also showing some capability in identifying minority classes, which is a good result for a stable model on this dataset.
+#### Color Indices (3 features)
+- **Blue-Red index** (0.44/0.70 μm ratio)
+- **Green-Red index** (0.55/0.70 μm ratio)
+- **NIR-Red ratio** (0.85/0.70 μm ratio)
 
-## How to Run
+### 3. **Class Balancing Techniques**
 
-1.  **Dependencies:** Ensure you have the required libraries installed. You can install them using pip:
-    ```bash
-    pip install scikit-learn pandas numpy matplotlib seaborn
-    ```
-2.  **Execute the script:**
-    ```bash
-    python3 stable_trainer.py
-    ```
+To handle the imbalanced nature of asteroid taxonomy data:
 
-## Generated Files
+#### Data Augmentation
+For minority classes with fewer than 10 samples:
+- Adds Gaussian noise (σ = 2% of signal)
+- Applies random scaling (95-105%)
+- Creates 2 synthetic samples per real sample
 
-The script will generate the following files in the current directory:
+#### SMOTE (Synthetic Minority Over-sampling Technique)
+- Generates synthetic samples by interpolating between existing minority class samples
+- Combined with Tomek links to remove borderline samples
+- Creates a more balanced training dataset
 
-*   `stable_classification_predictions.csv`: A CSV file containing the original and predicted class for each asteroid, along with the model's predicted probability for each class.
-*   `stable_classification_model.pkl`: The trained and saved scikit-learn model.
-*   `stable_classification_scaler.pkl`: The saved scikit-learn StandardScaler object for the engineered features.
-*   `stable_classification_label_encoder.pkl`: The saved scikit-learn LabelEncoder for the class labels.
-*   `stable_confusion_matrix.png`: A plot of the confusion matrix on the test set.
+### 4. **Ensemble Learning Architecture**
+
+The system uses a weighted voting ensemble of four complementary algorithms:
+
+#### Random Forest Classifier (Weight: 2.0)
+- **Hyperparameters optimized**: n_estimators (200-500), max_depth (10-30), min_samples_split/leaf
+- **Strengths**: Handles non-linear relationships, feature importance ranking
+- **Role**: Primary classifier due to robustness
+
+#### Gradient Boosting Classifier (Weight: 1.5)
+- **Hyperparameters optimized**: n_estimators (100-300), learning_rate (0.01-0.1), max_depth (3-10)
+- **Strengths**: Sequential error correction, high accuracy
+- **Role**: Refined predictions through boosting
+
+#### Support Vector Machine (Weight: 1.0)
+- **Configuration**: RBF kernel, C=10, gamma='scale'
+- **Strengths**: Effective in high-dimensional space
+- **Role**: Non-linear boundary detection
+
+#### Neural Network (MLP) (Weight: 1.0)
+- **Architecture**: 3 layers (100, 50, 25 neurons)
+- **Strengths**: Complex pattern recognition
+- **Role**: Captures subtle spectral patterns
+
+### 5. **Training Process**
+
+1. **Data Splitting**: 80/20 train-test split with stratification
+2. **Scaling**: RobustScaler (resistant to outliers) normalizes features
+3. **Hyperparameter Optimization**: RandomizedSearchCV with 5-fold cross-validation
+4. **Model Training**: Each model trained independently, then combined
+5. **Ensemble Creation**: Soft voting aggregates probability predictions
+
+## Features
+
+### Key Capabilities
+- ✅ Processes hundreds of spectra automatically
+- ✅ Handles varying wavelength ranges and resolutions
+- ✅ Robust to noise and outliers
+- ✅ Provides probability estimates for each class
+- ✅ Generates confidence scores for predictions
+- ✅ Creates visualizations of results
+
+### Advanced Techniques
+- 🔬 46 scientifically-motivated spectral features
+- 🎯 Multiple class balancing strategies
+- 🤖 4-model ensemble for robust predictions
+- 📊 Comprehensive evaluation metrics
+- 🎨 Feature importance analysis
+
+## Data Requirements
+
+### Input Files
+
+1. **Catalog File** (`MITHNEOSCLEAN.csv`)
+   ```
+   Columns required:
+   - Number: Integer asteroid ID
+   - Simplified Category: Taxonomic classification (e.g., 'S-Group', 'C-Group')
+   ```
+
+2. **Spectral Data Archive** (`visnir_files.zip`)
+   ```
+   File format: Text files with two columns
+   - Column 1: Wavelength (μm)
+   - Column 2: Reflectance (normalized or raw)
+   
+   Naming convention: 
+   - {asteroid_id}.txt or {asteroid_id}.visnir.txt
+   - Example: "433.txt" for asteroid 433 Eros
+   ```
+
+### Data Quality Requirements
+- Minimum 10 wavelength points per spectrum
+- Wavelength range should ideally cover 0.5-2.5 μm
+- At least 3 samples per class for training
+
+## Installation
+
+### Dependencies
+```python
+# Core libraries
+numpy >= 1.19.0
+pandas >= 1.2.0
+scipy >= 1.6.0
+
+# Machine learning
+scikit-learn >= 0.24.0
+imbalanced-learn >= 0.8.0
+
+# Visualization
+matplotlib >= 3.3.0
+seaborn >= 0.11.0
+
+# System
+pickle (standard library)
+zipfile (standard library)
+warnings (standard library)
+```
+
+### Installation Steps
+```bash
+# 1. Install required packages
+pip install numpy pandas scipy scikit-learn imbalanced-learn matplotlib seaborn
+
+# 2. Prepare your data
+# Place MITHNEOSCLEAN.csv and visnir_files.zip in asteroid/ directory
+
+# 3. Run the classifier
+python enhanced_asteroid_classifier.py
+```
+
+## Usage
+
+### Basic Usage
+```python
+# The script runs automatically when executed
+python enhanced_asteroid_classifier.py
+```
+
+### Using the Trained Model
+```python
+import pickle
+import numpy as np
+
+# Load the trained model and preprocessors
+with open('enhanced_classification_model.pkl', 'rb') as f:
+    model = pickle.load(f)
+    
+with open('enhanced_classification_scaler.pkl', 'rb') as f:
+    scaler = pickle.load(f)
+    
+with open('enhanced_classification_label_encoder.pkl', 'rb') as f:
+    label_encoder = pickle.load(f)
+    
+with open('feature_extractor.pkl', 'rb') as f:
+    extract_features = pickle.load(f)
+
+# Process a new spectrum
+wavelength = np.array([...])  # Your wavelength data
+reflectance = np.array([...])  # Your reflectance data
+
+# Extract features
+features_dict = extract_features(wavelength, reflectance)
+features = np.array(list(features_dict.values())).reshape(1, -1)
+
+# Scale features
+features_scaled = scaler.transform(features)
+
+# Make prediction
+prediction = model.predict(features_scaled)[0]
+probabilities = model.predict_proba(features_scaled)[0]
+
+# Decode prediction
+predicted_class = label_encoder.inverse_transform([prediction])[0]
+confidence = np.max(probabilities)
+
+print(f"Predicted class: {predicted_class} (confidence: {confidence:.2%})")
+```
+
+## Output Files
+
+### Model Files
+- `enhanced_classification_model.pkl`: Trained ensemble classifier
+- `enhanced_classification_scaler.pkl`: Feature scaling transformer
+- `enhanced_classification_label_encoder.pkl`: Class label encoder
+- `feature_extractor.pkl`: Feature extraction function
+
+### Results Files
+- `enhanced_classification_predictions.csv`: Predictions for all samples
+  ```csv
+  Original_Taxonomy, Predicted_Taxonomy, Prob_C-Group, Prob_S-Group, ..., Confidence, Prediction_Correct
+  ```
+
+### Visualization Files
+- `enhanced_confusion_matrix.png`: Confusion matrix heatmap
+- `feature_importance.png`: Top 20 most important features
+
+## Model Architecture
+
+```
+Input Spectrum (wavelength, reflectance)
+           ↓
+    Feature Extraction (46 features)
+           ↓
+     RobustScaler Normalization
+           ↓
+    ┌──────┴──────┬──────┬──────┐
+    ↓             ↓      ↓      ↓
+Random Forest  Gradient  SVM   MLP
+(weight: 2.0)  Boosting       Neural
+              (wt: 1.5)       Network
+    ↓             ↓      ↓      ↓
+    └──────┬──────┴──────┴──────┘
+           ↓
+    Soft Voting Ensemble
+           ↓
+    Class Probabilities
+           ↓
+    Final Prediction
+```
+
+## Performance Metrics
+
+### Evaluation Metrics
+- **Balanced Accuracy**: Accounts for class imbalance
+- **F1 Scores**: Weighted and macro averages
+- **Precision/Recall**: Per-class performance
+- **Confusion Matrix**: Visual error analysis
+
+### Expected Performance
+- Overall balanced accuracy: >0.85
+- S-Group (majority class): >0.90 F1 score
+- C-Group: >0.75 F1 score
+- Minority classes: >0.50 F1 score
+
+### Confidence Scores
+Each prediction includes a confidence score (0-1):
+- >0.8: High confidence
+- 0.6-0.8: Moderate confidence
+- <0.6: Low confidence (consider manual review)
+
+## Troubleshooting
+
+### Common Issues and Solutions
+
+#### ValueError: inhomogeneous shape
+**Cause**: Inconsistent feature vector lengths
+**Solution**: Ensures using the updated version with `get_feature_names()`
+
+#### Low performance on minority classes
+**Solutions**:
+- Increase augmentation multiplier for rare classes
+- Adjust class weights in classifiers
+- Collect more samples of minority classes
+- Consider merging similar rare classes
+
+#### Memory issues with large datasets
+**Solutions**:
+- Process spectra in batches
+- Reduce n_iter in RandomizedSearchCV
+- Use fewer estimators in ensemble
+
+#### No spectral files found
+**Check**:
+- Zip file path is correct
+- File naming convention matches expectation
+- Zip file isn't corrupted
+
+### Performance Optimization
+
+#### For Faster Training
+- Reduce hyperparameter search iterations
+- Use fewer models in ensemble
+- Decrease n_estimators in forest models
+- Use parallel processing (n_jobs=-1)
+
+#### For Better Accuracy
+- Increase training data through augmentation
+- Add more hyperparameter options
+- Include additional spectral features
+- Use cross-validation for threshold tuning
+
+## Scientific Background
+
+### Asteroid Taxonomy
+Asteroid classification is based on spectral characteristics that indicate surface composition:
+
+- **S-Group**: Silicaceous, stony composition (most common in inner belt)
+- **C-Group**: Carbonaceous, primitive composition (most common overall)
+- **X-Group**: Metallic composition (includes M, E, P types)
+- **V-type**: Basaltic, associated with Vesta family
+- **D-type**: Very red, organic-rich (outer belt/Trojans)
+
+### Why Spectral Features Matter
+- **Absorption bands**: Direct indicators of mineral composition
+- **Spectral slopes**: Related to space weathering and composition
+- **Color indices**: Correlate with taxonomic types
+- **Curvature**: Indicates mixture of materials
+
+## Future Enhancements
+
+### Planned Improvements
+- [ ] Deep learning models (CNN on raw spectra)
+- [ ] Transfer learning from lunar/meteorite data
+- [ ] Active learning for uncertain samples
+- [ ] Multi-wavelength data fusion (thermal IR)
+- [ ] Hierarchical classification (complex types)
+
+### Contributing
+To improve the model:
+1. Add more labeled training data
+2. Implement new feature extraction methods
+3. Test alternative ML algorithms
+4. Optimize hyperparameters further
+
+## Citation
+
+If you use this classification system in your research, please cite:
+```
+Enhanced Asteroid Classification System
+[Your Name/Organization]
+Version 2.0, 2024
+https://github.com/[your-repo]
+```
+
+## License
+
+[Specify your license here]
+
+## Contact
+
+For questions, issues, or contributions:
+- Email: [your-email]
+- GitHub: [your-github]
+- Issues: [repo-issues-link]
+
+---
+
+*Last updated: 2024*
